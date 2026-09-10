@@ -12,7 +12,7 @@ class QVariantAnimation;
 // 桌面悬浮音效按钮：整个界面只有一个 QQ emoji 按钮 + 右上角图钉。
 //  - 左键按下：播音效，并播放"手指按下"动画；按住不续播、松开瞬时复位（无回弹动画）
 //  - 图钉：切换窗口置顶（实心=置顶，空心=不置顶）
-//  - 滚轮：切换音效；拖动：移动位置；右键：全部设置都在菜单里
+//  - 拖动：移动位置；右键：全部设置都在菜单里（切换音效走菜单里的列表）
 // 它同时是整个应用的外壳：持有数据层（SoundLibrary）与播放层（AudioEngine），
 // 并负责托盘图标；不直接接触音频 API。
 class SoundButtonWidget : public QWidget {
@@ -26,7 +26,6 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;   // 按下即播（低延迟的关键）
     void mouseMoveEvent(QMouseEvent *event) override;    // 超过阈值判定拖动，停掉误播
     void mouseReleaseEvent(QMouseEvent *event) override;
-    void wheelEvent(QWheelEvent *event) override;        // 滚轮循环切换音效
     void contextMenuEvent(QContextMenuEvent *event) override;   // 右键菜单
 
 private:

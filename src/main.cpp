@@ -12,6 +12,6 @@ int main(int argc, char *argv[]) {
     // 构造里已经完成：读 config.json、启动后台解码、给输出设备排预热定时器
     SoundButtonWidget w;
     w.show();
-    // 事件循环：鼠标按下/滚轮/右键菜单/托盘点击都在这里派发；退出由菜单或托盘触发
+    // 事件循环：鼠标按下/右键菜单/托盘点击都在这里派发；退出由菜单或托盘触发
     return QApplication::exec();
 }

@@ -33,7 +33,7 @@ PATH="/d/Library/msys64/ucrt64/bin:$PATH" ./build/soundbutton.exe   # 运行需�
   - 空闲态（播完）再点击走 `start()`，实测 0.1ms —— 所以要让流停留在 Idle，而不是 Stopped。
   - 输出设备变化（`QMediaDevices::audioOutputsChanged`）时 `invalidateSinks()` 丢弃重建。
   - PCM 缓冲区（`QByteArray`）必须与 QBuffer 同生命周期；现由 `Stream::pcm` + 条目共同持有。
-- 配置便携式：`config.json` 写在 `QCoreApplication::applicationDirPath()` 下；首次运行自动导入 exe 旁 `sounds/`。音效列表/当前项/音量/窗口位置/置顶都存这里。
+- 配置便携式：`config.json` 写在 `QCoreApplication::applicationDirPath()` 下；首次运行自动导入 exe 旁 `sounds/`。音效列表/当前项（`lastPlayed` 存路径，启动时恢复）/音量/窗口位置/置顶都存这里。
 - **交互契约（`SoundButtonWidget`，改界面时保持）**：
   - 界面只有两样东西：中间的 emoji 按钮 + 右上角的图钉。窗口里不放任何文字——音效名走 tooltip 和切换时的 `flashName()` 气泡，状态用浓淡表达（解码中 55% 透明度，解码失败 40% + 右下角红点）。
   - 左键**按下**即播，不等松开；移动超过 8px 判定为拖动并停掉误播（见 `SoundButtonWidget::mouseMoveEvent`）。
@@ -60,7 +60,7 @@ PATH="/d/Library/msys64/ucrt64/bin:$PATH" ./build/soundbutton.exe   # 运行需�
 
 从终端启动：`set SOUNDBUTTON_LATENCY_LOG=1 && build\soundbutton.exe 2> lat.log`，每次点击打印「按下 → 推流 x ms」与路径（`start` / `suspend→resume`）。
 
-合成点击（PowerShell + `EnumWindows` 找可见窗口，再 `PostMessage`）：左键 `WM_LBUTTONDOWN(0x0201)/WM_LBUTTONUP(0x0202)`，滚轮 `WM_MOUSEWHEEL(0x020A)`（delta 在高 16 位），右键 `WM_RBUTTONDOWN/UP(0x0204/0x0205)`。三个坑：
+合成点击（PowerShell + `EnumWindows` 找可见窗口，再 `PostMessage`）：左键 `WM_LBUTTONDOWN(0x0201)/WM_LBUTTONUP(0x0202)`，右键 `WM_RBUTTONDOWN/UP(0x0204/0x0205)`。三个坑：
 
 1. lParam 是**物理像素**的客户区坐标——本机 125% 缩放，逻辑坐标要 ×1.25，否则点不到图钉这种小目标；
 2. 合成的 `WM_MOUSEMOVE(0x0200)` **不能用来测拖动**：Qt 算鼠标坐标时会掺进真实光标的位置，位移可能放大或方向都不对（看着像程序 bug，其实是测试假象）。拖动验证请注入真实光标（`SetCursorPos` + `mouse_event(LEFTDOWN / 分步 MOVE / LEFTUP)`），实测窗口 1:1 跟随、config 同步；

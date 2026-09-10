@@ -17,7 +17,6 @@
 #include <QTimer>
 #include <QToolTip>
 #include <QVariantAnimation>
-#include <QWheelEvent>
 #include <QWidgetAction>
 
 namespace {
@@ -255,14 +254,6 @@ void SoundButtonWidget::mouseReleaseEvent(QMouseEvent *e) {
     update();
 }
 
-void SoundButtonWidget::wheelEvent(QWheelEvent *e) {
-    const int n = m_lib->count();
-    if (n == 0) return;
-    // 只切换不播放：滚轮用来"选"，点击才出声
-    const int step = e->angleDelta().y() > 0 ? -1 : 1;
-    m_lib->setCurrent((m_lib->currentIndex() + step + n) % n);
-}
-
 void SoundButtonWidget::contextMenuEvent(QContextMenuEvent *e) {
     // 菜单结构：音效列表（单选）→ 添加/移除 → 音量 → 置顶 → 退出
     QMenu menu(this);
@@ -367,7 +358,7 @@ void SoundButtonWidget::updateToolTip() {
     else if (en->failed) tip = tr("解码失败：%1").arg(en->name);
     else if (!en->ready) tip = tr("加载中…");
     else                 tip = tr("当前音效：%1").arg(en->name);
-    tip += tr("\n点击播放 · 滚轮切换 · 拖动移动 · 图钉置顶 · 右键菜单");
+    tip += tr("\n点击播放 · 拖动移动 · 图钉置顶 · 右键菜单");
     setToolTip(tip);
 }
 

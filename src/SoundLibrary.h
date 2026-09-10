@@ -43,7 +43,7 @@ public:
     void addFiles(const QStringList &paths);
     // 删除当前项，并把光标落到相邻音效上
     void removeCurrent();
-    // 切换当前音效（会立即写 config.json，滚轮换来换去也记得住）
+    // 切换当前音效（会立即写 config.json，重启后仍停在这个音效上）
     void setCurrent(int index);
 
     // 窗口层状态也统一存进 config.json
@@ -54,7 +54,7 @@ public:
     bool alwaysOnTop() const { return m_alwaysOnTop; }
     void setAlwaysOnTop(bool on);
 
-    void loadConfig(); // 没有 config.json 时自动导入 exe 旁 sounds/ 目录
+    void loadConfig(); // 没有 config.json 时自动导入 exe 旁 sounds/ 目录；有则恢复上次播放的音效
     void saveConfig(); // 用 QSaveFile 原子写入，避免断电写坏配置
 
     // 能解码的扩展名（实际支持范围由 FFmpeg 后端决定），文件对话框和自动导入共用

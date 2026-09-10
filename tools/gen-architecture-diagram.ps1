@@ -72,13 +72,13 @@ $g.DrawString("Windows 桌面悬浮音效按钮 · C++17 / Qt 6 · 点击即播�
 
 # ---------- 用户操作 ----------
 Draw-Box 520 106 480 78 ([System.Drawing.Color]::FromArgb(241, 243, 244)) $cGray "用户操作" @()
-$g.DrawString("左键按下（按下即播）· 滚轮切换 · 右键菜单 · 托盘图标", $fBody,
+$g.DrawString("左键按下（按下即播）· 右键菜单切换音效 · 托盘图标", $fBody,
               (New-Object System.Drawing.SolidBrush($cText)), 542, 150)
 
 # ---------- UI 层 ----------
 Draw-Box 140 244 1240 168 ([System.Drawing.Color]::FromArgb(232, 240, 254)) $cBlue "SoundButtonWidget（UI 层 · 主线程）" @(
     "界面只有一个 QQ emoji 按钮（10 帧按下动画）+ 右上角图钉（切换置顶），其余设置全在右键菜单",
-    "mousePress 按下即播 · mouseMove 位移 > 8px 判定拖动并停声 · wheel 切换 · contextMenu 菜单",
+    "mousePress 按下即播 · mouseMove 位移 > 8px 判定拖动并停声 · contextMenu 菜单",
     "启动 300ms 后 prepareFormats()：把设备枚举与建流成本移出点击路径（entryReady 时对新格式随手预热）"
 )
 

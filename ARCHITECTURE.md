@@ -8,12 +8,12 @@
 ![项目架构图](docs/architecture.png)
 
 ```
-用户操作：左键按下（按下即播）· 滚轮切换 · 右键菜单 · 托盘图标 · 右上角图钉切换置顶
+用户操作：左键按下（按下即播）· 右键菜单 · 托盘图标 · 右上角图钉切换置顶
 └─ SoundButtonWidget —— UI 层（主线程，唯一持有界面与业务的地方）
    ├─ 界面 = QQ emoji 按钮（10 帧按下动画）+ 右上角图钉，窗口里一个文字都没有
    ├─ 状态用浓淡表达：解码中 55% 透明、失败 40% + 右下角红点；音效名走 tooltip / 切换气泡
    ├─ 素材：assets/button_0..9.png（离线烘焙的按钮帧）+ pin / pin_fill.png，编进 exe
-   ├─ mousePress 按下即播 · mouseMove 超 8px 判拖动并停声 · wheel 切换 · contextMenu 菜单
+   ├─ mousePress 按下即播 · mouseMove 超 8px 判拖动并停声 · contextMenu 菜单
    ├─ QSystemTrayIcon 托盘 · 启动 300ms 后 prepareFormats() 预热
    ├─▶ SoundLibrary —— 数据层
    │     SoundEntry[]：path / name / format / pcm(shared_ptr) / ready / failed / trimmedLeadMs
@@ -34,7 +34,7 @@ Mermaid 版（GitHub 与支持 Mermaid 的编辑器可直接渲染）：
 
 ```mermaid
 flowchart TD
-    U["用户操作<br/>按下 · 滚轮 · 右键 · 托盘"] -->|鼠标事件| UI
+    U["用户操作<br/>按下 · 右键 · 托盘"] -->|鼠标事件| UI
 
     subgraph UI["SoundButtonWidget（UI 层 · 主线程）"]
         P["paintEvent 自绘按钮"]
@@ -71,7 +71,7 @@ flowchart TD
 | 文件 | 层 | 职责 | 关键点 |
 | --- | --- | --- | --- |
 | `src/main.cpp` | 入口 | 起 `QApplication`、显示窗口、进事件循环 | 十几行；所有逻辑都在窗口里 |
-| `src/SoundButtonWidget.*` | UI | 无边框置顶小窗、自绘、鼠标/滚轮/右键、托盘、预热调度 | 只调用数据层与播放层，不碰音频 API |
+| `src/SoundButtonWidget.*` | UI | 无边框置顶小窗、自绘、鼠标/右键、托盘、预热调度 | 只调用数据层与播放层，不碰音频 API |
 | `src/SoundLibrary.*` | 数据 | 音效列表、后台预解码、裁静音、`config.json` 持久化 | `QAudioDecoder` → 内存 PCM（`shared_ptr`） |
 | `src/AudioEngine.*` | 播放 | 按采样格式维护热流池、推流、停声、音量 | `QAudioSink` + `QBuffer`，零拷贝 |
 | `src/LatencyLog.h` | 诊断 | 「按下 → 推流」耗时打点 | 直接 `fprintf(stderr)`，环境变量开关 |
@@ -92,7 +92,7 @@ sequenceDiagram
     participant L as SoundLibrary
     participant A as AudioEngine
     W->>L: loadConfig()
-    L->>L: 读 config.json（或首次导入 exe 旁 sounds/）
+    L->>L: 读 config.json（恢复上次的音效；或首次导入 exe 旁 sounds/）
     L->>L: 每个音效启动一次 QAudioDecoder（异步）
     W->>W: 显示窗口（界面立刻可画）
     Note over W: 300ms 后
@@ -147,7 +147,8 @@ sequenceDiagram
   同一 `Stream` 的 `silence`（预热静音）必须与 `QBuffer` 同生命周期。
 - **设备变化**：`QMediaDevices::audioOutputsChanged` → `invalidateSinks()` 丢弃全部热流
   → `prepareFormats()` 在新设备上重建（旧设备上的流已无意义）。
-- **窗口层状态**（音量/位置/置顶/列表）统一存在 exe 旁的 `config.json`，由 `SoundLibrary` 读写。
+- **窗口层状态**（音量/位置/置顶/列表/上次播放的音效）统一存在 exe 旁的 `config.json`，由 `SoundLibrary` 读写；
+  启动时按 `lastPlayed`（存路径，列表增删也不会错位）恢复当前音效。
 
 ## 六、必须守住的不变量
 

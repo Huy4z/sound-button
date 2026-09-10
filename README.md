@@ -9,7 +9,6 @@
 - **界面**：只有一个按钮和一个图钉。按钮是 QQ emoji「续标识」的红按钮（按下会播 10 帧的按压动画，松开瞬时复位，没有回弹动画），右上角图钉用来开关窗口置顶（实心蓝=置顶，空心灰=不置顶）。其余设置全部在右键菜单里。
 - **点击即播**：解码在添加时后台完成（顺手裁掉首尾静音），输出设备在启动时预热，按下到推流约 0.1~0.8ms（实测）；再点一次是"从头重播"，同样只要 ~0.6ms。
 - **再次点击**：停止并从头重播。
-- **滚轮**：切换上一个 / 下一个音效。
 - **右键菜单**：
   - 音效列表（点选切换并播放）
   - 添加音效…（多选文件）
@@ -20,7 +19,7 @@
 - **拖动**：按住按钮拖动可移动位置，自动保存；位移不超过 8px 仍算点击，不会打断音效。
 - **托盘图标**：单击显示/隐藏按钮，右键可退出。
 - **格式**：mp3 / wav / ogg / flac / m4a / aac / opus / wma 等（经 FFmpeg 解码），目前以 mp3 为主。
-- **记忆**：音效列表、当前音效、音量、窗口位置、置顶状态存于 exe 旁 `config.json`，便携可带走。
+- **记忆**：音效列表、当前音效（重启后自动恢复，配置里存为 `lastPlayed`）、音量、窗口位置、置顶状态存于 exe 旁 `config.json`，便携可带走。
 
 ## 延迟（实测，Qt 6.10 / WASAPI）
 
@@ -67,7 +66,7 @@ PATH="/d/Library/msys64/ucrt64/bin:$PATH" windeployqt --release --no-compiler-ru
 
 ```
 src/main.cpp              入口：起 QApplication、显示窗口、进事件循环
-src/SoundButtonWidget.*   悬浮按钮窗口：emoji 按钮与图钉的绘制/命中、按下播放、拖动、滚轮、右键菜单、托盘、预热调度
+src/SoundButtonWidget.*   悬浮按钮窗口：emoji 按钮与图钉的绘制/命中、按下播放、拖动、右键菜单、托盘、预热调度
 src/SoundLibrary.*        音效列表：QAudioDecoder 预解码成内存 PCM、裁首尾静音、config.json 持久化
 src/AudioEngine.*         QAudioSink 播放封装：按格式预热热流、suspend/resume 重播、零拷贝推流
 src/LatencyLog.h          点击→推流的耗时打点（SOUNDBUTTON_LATENCY_LOG=1 时输出）

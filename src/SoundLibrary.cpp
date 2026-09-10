@@ -230,6 +230,26 @@ void SoundLibrary::loadConfig() {
             if (!path.isEmpty() && QFileInfo::exists(path)) paths << path;
         }
         addFiles(paths);
+
+        // 恢复"上次播放"的音效：优先按路径找——列表增删、文件缺失都会让存下来的
+        // 下标错位，路径不会；只有老配置里没写 lastPlayed 时才退回用下标
+        int restore = -1;
+        const QString lastPath = o.value(QStringLiteral("lastPlayed")).toString();
+        if (!lastPath.isEmpty()) {
+            // 先归一成绝对路径再比：配置里可能是反斜杠等别的写法，条目路径是 absoluteFilePath 形式
+            const QString want = QFileInfo(lastPath).absoluteFilePath();
+            for (int i = 0; i < count(); ++i) {
+                if (m_entries[i]->path == want) {
+                    restore = i;
+                    break;
+                }
+            }
+        }
+        if (restore < 0) {
+            const int saved = o.value(QStringLiteral("current")).toInt(-1);
+            if (saved >= 0 && saved < count()) restore = saved;
+        }
+        if (restore >= 0) m_current = restore;
         if (m_current >= count()) m_current = count() - 1;
         return;
     }
@@ -257,6 +277,9 @@ void SoundLibrary::saveConfig() {
     QJsonObject o;
     o[QStringLiteral("sounds")] = sounds;
     o[QStringLiteral("current")] = m_current;
+    // "上次播放"：存路径而不是下标（列表增删后下标会错位），启动时按它恢复当前音效
+    if (const SoundEntry *cur = entry(m_current))
+        o[QStringLiteral("lastPlayed")] = cur->path;
     o[QStringLiteral("volume")] = m_volume;
     o[QStringLiteral("pos")] = QJsonArray{m_windowPos.x(), m_windowPos.y()};
     o[QStringLiteral("alwaysOnTop")] = m_alwaysOnTop;
