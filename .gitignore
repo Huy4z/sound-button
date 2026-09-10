@@ -1,0 +1,10 @@
+# 构建与打包产物
+build/
+dist/
+
+# ZCode 会话数据
+.zcode/
+
+# 系统文件
+Thumbs.db
+Desktop.ini
