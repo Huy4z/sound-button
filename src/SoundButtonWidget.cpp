@@ -29,8 +29,7 @@ constexpr int kWindowPad = 2;         // 按钮四周留一点余量给缩放抗
 constexpr int kBadgeSize = 26;        // 图钉徽标直径
 constexpr int kBadgeIconSize = 14;    // 图钉图标在徽标里的边长
 constexpr int kFrameCount = 10;       // 按下动画帧数（素材是 9 帧 @60fps，多一帧收尾更自然）
-constexpr int kPressMs = 150;         // 按下动画时长
-constexpr int kReleaseMs = 120;       // 松开回弹时长
+constexpr int kPressMs = 150;         // 按下动画时长（动画只有"按下"这一个触发点）
 
 // 把单色图标染成指定颜色（素材是黑色剪影，靠这个出两态配色）
 QPixmap tinted(const QPixmap &src, const QColor &color) {
@@ -61,7 +60,8 @@ SoundButtonWidget::SoundButtonWidget(QWidget *parent) : QWidget(parent) {
     move(m_lib->windowPos());
     m_audio->setVolume(m_lib->volume());
 
-    // 按下动画：值就是帧号，按下正放到最后一帧，松手倒放回第一帧
+    // 按下动画：值就是帧号，只有按下时正放到最后一帧；
+    // 按住不续播、松开/拖动一律瞬时复位（见 resetPress），不做倒放回弹
     m_pressAnim = new QVariantAnimation(this);
     m_pressAnim->setStartValue(0.0);
     m_pressAnim->setEndValue(qreal(kFrameCount - 1));
@@ -214,21 +214,21 @@ void SoundButtonWidget::mousePressEvent(QMouseEvent *e) {
     }
 
     m_pressUs = sbNowUs();   // 诊断用：记下按下时刻，推流后算端到端耗时
-    animatePress(true);
+    animatePress();
     playCurrent();   // 按下即播，不等松开
     update();
 }
 
 void SoundButtonWidget::mouseMoveEvent(QMouseEvent *e) {
     if (!m_pressed) return;
-    // 交互契约：位移超过 8px 才当拖动，此时停掉刚触发的误播并放弃按下动画；
+    // 交互契约：位移超过 8px 才当拖动，此时停掉刚触发的误播并复位按下动画（不播回弹）；
     // 8px 以内仍算点击，声音继续播（手抖不会打断音效）
     if (!m_dragging &&
         (e->globalPosition().toPoint() - m_pressGlobal).manhattanLength() > kDragThreshold) {
         m_dragging = true;
         m_pendingPlay = false;
         m_pinPressed = false;
-        animatePress(false);
+        resetPress();
         m_audio->stop();   // 确认是拖动而非点击，停掉误播（暂停，保住热流）
     }
     if (m_dragging)
@@ -241,9 +241,9 @@ void SoundButtonWidget::mouseReleaseEvent(QMouseEvent *e) {
     if (m_pinPressed) {   // 松开时还在图钉上才算数（和普通按钮一样可以滑出去取消）
         m_pinPressed = false;
         if (pinRect().contains(e->pos())) toggleAlwaysOnTop();
-    } else if (!m_dragging) {
-        animatePress(false);   // 松开回弹（拖动时已经在 mouseMoveEvent 里回弹过）
     }
+    // 松开不播动画：不管按住过多久、是不是拖动，都瞬时回到未按下姿态
+    resetPress();
 
     if (m_dragging) {
         // 拖动结束才写配置，避免拖动过程中反复写文件
@@ -345,14 +345,19 @@ void SoundButtonWidget::prepareFormats() {
             m_audio->prepare(en->format);
 }
 
-void SoundButtonWidget::animatePress(bool down) {
-    // 从当前帧接着走，连点也不会跳帧
-    const qreal current = m_pressAnim->currentValue().toReal();
+// 动画唯一的播放入口：按下时从松开姿态正放到完全按下
+void SoundButtonWidget::animatePress() {
     m_pressAnim->stop();
-    m_pressAnim->setDuration(down ? kPressMs : kReleaseMs);
-    m_pressAnim->setStartValue(current);
-    m_pressAnim->setEndValue(down ? qreal(kFrameCount - 1) : 0.0);
+    m_pressAnim->setCurrentTime(0);   // stop() 会把值冻结在最后一帧，先 seek 回起点
     m_pressAnim->start();
+}
+
+// 松开 / 判定为拖动：瞬时回到未按下姿态。
+// 不做倒放回弹、按住期间也不续播——动画只在按下那一刻被触发
+void SoundButtonWidget::resetPress() {
+    m_pressAnim->stop();
+    m_pressAnim->setCurrentTime(0);
+    update();
 }
 
 void SoundButtonWidget::updateToolTip() {

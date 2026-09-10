@@ -37,6 +37,7 @@ PATH="/d/Library/msys64/ucrt64/bin:$PATH" ./build/soundbutton.exe   # 运行需�
 - **交互契约（`SoundButtonWidget`，改界面时保持）**：
   - 界面只有两样东西：中间的 emoji 按钮 + 右上角的图钉。窗口里不放任何文字——音效名走 tooltip 和切换时的 `flashName()` 气泡，状态用浓淡表达（解码中 55% 透明度，解码失败 40% + 右下角红点）。
   - 左键**按下**即播，不等松开；移动超过 8px 判定为拖动并停掉误播（见 `SoundButtonWidget::mouseMoveEvent`）。
+  - 按下动画只在**按下**时播一次（`animatePress()`）：按住不续播，松开/拖动走 `resetPress()` 瞬时复位，没有回弹动画。
   - 图钉（`pinRect()` 命中区）只切换置顶，不播音效、不触发按下动画；它是置顶的主入口，右键菜单里那项与之共用 `m_lib->alwaysOnTop()`，两边必须同步。
   - 窗口尺寸 = `kButtonSize + 2*kWindowPad`，图钉徽标压在按钮右上角；改大小只需改这两个常量（帧缓存按设备像素比自动重建）。
 

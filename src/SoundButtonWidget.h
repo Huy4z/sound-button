@@ -10,7 +10,7 @@ class QSystemTrayIcon;
 class QVariantAnimation;
 
 // 桌面悬浮音效按钮：整个界面只有一个 QQ emoji 按钮 + 右上角图钉。
-//  - 左键按下：播音效，并播放"手指按下"动画；松开回弹
+//  - 左键按下：播音效，并播放"手指按下"动画；按住不续播、松开瞬时复位（无回弹动画）
 //  - 图钉：切换窗口置顶（实心=置顶，空心=不置顶）
 //  - 滚轮：切换音效；拖动：移动位置；右键：全部设置都在菜单里
 // 它同时是整个应用的外壳：持有数据层（SoundLibrary）与播放层（AudioEngine），
@@ -43,7 +43,8 @@ private:
     QRect pinRect() const;      // 图钉徽标：绘制与命中判定共用同一个矩形
     void ensureAssets();        // 按当前 DPI 缩放素材（换了屏幕/缩放就重建）
     void drawPin(QPainter &painter);
-    void animatePress(bool down);   // 按下动画：正放到底 / 倒放回弹
+    void animatePress();   // 按下动画（唯一触发点）：正放到完全按下
+    void resetPress();     // 松开/拖动：瞬时复位到未按下姿态，不播动画
 
     SoundLibrary *m_lib = nullptr;    // 数据层：列表、后台解码、config.json
     AudioEngine *m_audio = nullptr;   // 播放层：热流池、推流、音量

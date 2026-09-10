@@ -114,7 +114,7 @@ sequenceDiagram
     participant A as AudioEngine
     U->>W: WM_LBUTTONDOWN（按下即播，不等松开）
     W->>W: 记下 m_pressUs（仅诊断）
-    W->>W: 播放按下动画（10 帧 / 150ms，松手倒放回弹）
+    W->>W: 播放按下动画（10 帧 / 150ms，只有按下触发；按住/松开都不播，松开瞬时复位）
     W->>A: play(pcm, format)
     A->>A: streamFor(format)：命中热流（线性查找）
     A->>A: QBuffer 换源（指针替换，不拷贝）
@@ -159,3 +159,4 @@ sequenceDiagram
 6. **拖动判定阈值 8px** 是交互契约的一部分（超阈值停掉误播），改交互时要保留。
 7. **界面不放文字**：窗口里只有按钮和图钉，音效名/状态一律走 tooltip、切换气泡与浓淡；图钉命中区只负责置顶，不播音效、不触发按下动画。
 8. **按钮动画是离线烘焙的位图**：运行时不做 Lottie 渲染（改素材见 `AGENTS.md` 的「界面素材」一节）。
+9. **按下动画只在按下那一刻播一次**：`animatePress()` 只由 `mousePressEvent` 调用；按住不续播，松开/拖动一律 `resetPress()` 瞬时复位，不做倒放回弹（`stop()` 会把值冻结在最后一帧，复位必须再 `setCurrentTime(0)`）。
