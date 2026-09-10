@@ -8,109 +8,195 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileDialog>
+#include <QMediaDevices>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPen>
 #include <QSlider>
 #include <QSystemTrayIcon>
+#include <QTimer>
+#include <QToolTip>
+#include <QVariantAnimation>
 #include <QWheelEvent>
 #include <QWidgetAction>
 
 namespace {
-constexpr int kDragThreshold = 8;
+constexpr int kDragThreshold = 8;     // 移动超过这么多像素就判定为"拖动"而不是"点击"
+constexpr int kWarmUpDelayMs = 300;   // 启动后多久开始预热播放流
 
-// 喇叭主体（小方块 + 外张喇叭口），在给定矩形内按比例绘制
-QPolygonF speakerBody(const QRectF &r) {
-    return {
-        {r.left(),                       r.top() + r.height() * 0.38},
-        {r.left() + r.width() * 0.22,    r.top() + r.height() * 0.38},
-        {r.left() + r.width() * 0.45,    r.top() + r.height() * 0.16},
-        {r.left() + r.width() * 0.45,    r.top() + r.height() * 0.84},
-        {r.left() + r.width() * 0.22,    r.top() + r.height() * 0.62},
-        {r.left(),                       r.top() + r.height() * 0.62}};
+constexpr int kButtonSize = 100;      // 按钮边长（逻辑像素）
+constexpr int kWindowPad = 2;         // 按钮四周留一点余量给缩放抗锯齿
+constexpr int kBadgeSize = 26;        // 图钉徽标直径
+constexpr int kBadgeIconSize = 14;    // 图钉图标在徽标里的边长
+constexpr int kFrameCount = 10;       // 按下动画帧数（素材是 9 帧 @60fps，多一帧收尾更自然）
+constexpr int kPressMs = 150;         // 按下动画时长
+constexpr int kReleaseMs = 120;       // 松开回弹时长
+
+// 把单色图标染成指定颜色（素材是黑色剪影，靠这个出两态配色）
+QPixmap tinted(const QPixmap &src, const QColor &color) {
+    QPixmap pm(src.size());
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.drawPixmap(0, 0, src);
+    p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    p.fillRect(pm.rect(), color);
+    return pm;
 }
 }  // namespace
 
 SoundButtonWidget::SoundButtonWidget(QWidget *parent) : QWidget(parent) {
+    // ---- 依赖装配：数据层 + 播放层，先读配置（音量、位置、音效列表） ----
     m_lib = new SoundLibrary(this);
     m_audio = new AudioEngine(this);
     m_lib->loadConfig();
 
+    // ---- 窗口外观：无边框 + 不进任务栏 + 置顶 + 透明背景，内容全部自绘 ----
     Qt::WindowFlags flags = Qt::FramelessWindowHint | Qt::Tool;
     if (m_lib->alwaysOnTop()) flags |= Qt::WindowStaysOnTopHint;
     setWindowFlags(flags);
     setAttribute(Qt::WA_TranslucentBackground);
-    setFixedSize(190, 54);
+    setFixedSize(kButtonSize + kWindowPad * 2, kButtonSize + kWindowPad * 2);
     setWindowTitle(tr("音效按钮"));
 
     move(m_lib->windowPos());
     m_audio->setVolume(m_lib->volume());
 
+    // 按下动画：值就是帧号，按下正放到最后一帧，松手倒放回第一帧
+    m_pressAnim = new QVariantAnimation(this);
+    m_pressAnim->setStartValue(0.0);
+    m_pressAnim->setEndValue(qreal(kFrameCount - 1));
+    m_pressAnim->setDuration(kPressMs);
+    m_pressAnim->setEasingCurve(QEasingCurve::OutCubic);
+    connect(m_pressAnim, &QVariantAnimation::valueChanged, this,
+            qOverload<>(&QWidget::update));
+
+    // ---- 信号接线 ----
     connect(m_lib, &SoundLibrary::entriesChanged, this,
             qOverload<>(&QWidget::update));
     connect(m_lib, &SoundLibrary::currentChanged, this, [this] {
+        // 手动切换音效时取消"就绪后补播"，否则会放错曲子
         m_pendingPlay = false;
+        updateToolTip();
+        if (isVisible()) flashName();   // 窗口里没有文字，切歌时弹一下名字
         update();
     });
     connect(m_lib, &SoundLibrary::entryReady, this, [this](int index) {
+        // 之后才解码出来的新格式，也顺手预热（建流成本不在点击路径上）
+        if (const SoundEntry *en = m_lib->entry(index); m_warmUpDone && en && en->ready)
+            m_audio->prepare(en->format);
+        // 解码慢、用户已经点过了：现在数据齐了，补上这次播放
         if (index == m_lib->currentIndex() && m_pendingPlay) {
             m_pendingPlay = false;
             playCurrent();
         }
+        updateToolTip();
         update();
     });
+    // 插拔耳机 / 切换默认输出：热流绑在旧设备上已失效，重建并重新预热
+    auto *devices = new QMediaDevices(this);
+    connect(devices, &QMediaDevices::audioOutputsChanged, this, [this] {
+        m_audio->invalidateSinks();
+        prepareFormats();
+    });
 
+    // 预热：设备枚举 + 建流 + 流初始化在本机合计约 1s（首次点击时付就是干等），
+    // 这里推迟一拍执行，先让窗口显示出来
+    QTimer::singleShot(kWarmUpDelayMs, this, [this] {
+        m_warmUpDone = true;
+        prepareFormats();
+    });
+
+    updateToolTip();
     makeTrayIcon();
 }
 
-void SoundButtonWidget::paintEvent(QPaintEvent *) {
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
+QRect SoundButtonWidget::buttonRect() const {
+    return QRect(kWindowPad, kWindowPad, kButtonSize, kButtonSize);
+}
 
-    const SoundEntry *en = m_lib->entry(m_lib->currentIndex());
-    QColor base;
-    if (!en)             base = QColor(64, 68, 76, 235);
-    else if (en->failed) base = QColor(0xb0, 0x36, 0x40, 240);
-    else if (!en->ready) base = QColor(96, 102, 112, 240);
-    else                 base = QColor(0x2b, 0x6b, 0xf2, 240);
-    if (m_pressed && !m_dragging) base = base.darker(112);
+// 图钉压在按钮右上角：坐标与按钮区域部分重叠，但装饰本身在右上角是透明的
+QRect SoundButtonWidget::pinRect() const {
+    return QRect(width() - kWindowPad - kBadgeSize, 0, kBadgeSize, kBadgeSize);
+}
 
-    const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
-    p.setPen(Qt::NoPen);
-    p.setBrush(base);
-    p.drawRoundedRect(r, 20, 20);
+// 素材按当前 DPI 缩放一次后缓存；换屏幕/改缩放（DPR 变化）时重建
+void SoundButtonWidget::ensureAssets() {
+    const qreal dpr = devicePixelRatioF();
+    if (!m_frames.isEmpty() && qFuzzyCompare(m_assetsDpr, dpr)) return;
 
-    // 自绘喇叭图标，不依赖任何图标资源
-    const QRectF iconRect(r.left() + 13, r.center().y() - 11, 22, 22);
-    p.setBrush(Qt::white);
-    p.drawPolygon(speakerBody(iconRect));
-    if (en && en->ready) {
-        QPen wave(Qt::white, 1.8, Qt::SolidLine, Qt::RoundCap);
-        p.setPen(wave);
-        p.setBrush(Qt::NoBrush);
-        p.drawArc(QRectF(iconRect.left() + 11, iconRect.center().y() - 4, 8, 8),
-                  -50 * 16, 100 * 16);
-        p.drawArc(QRectF(iconRect.left() + 11, iconRect.center().y() - 7.5, 15, 15),
-                  -50 * 16, 100 * 16);
+    const QSize frameSize(qRound(buttonRect().width() * dpr),
+                          qRound(buttonRect().height() * dpr));
+    m_frames.clear();
+    m_frames.reserve(kFrameCount);
+    for (int i = 0; i < kFrameCount; ++i) {
+        QPixmap pm(QStringLiteral(":/assets/button_%1.png").arg(i));
+        pm = pm.scaled(frameSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        pm.setDevicePixelRatio(dpr);
+        m_frames.append(pm);
     }
 
-    QFont f = p.font();
-    f.setPointSizeF(10.5);
-    f.setBold(true);
-    p.setFont(f);
-    p.setPen(Qt::white);
-    QString text;
-    if (!en)             text = tr("右键添加音效");
-    else if (en->failed) text = tr("解码失败：%1").arg(en->name);
-    else if (!en->ready) text = tr("加载中…");
-    else                 text = en->name;
-    const qreal textLeft = iconRect.right() + 9;
-    const qreal textWidth = r.right() - 14 - textLeft;
-    const QString elided =
-        QFontMetrics(f).elidedText(text, Qt::ElideRight, int(textWidth));
-    p.drawText(QRectF(textLeft, r.top(), textWidth, r.height()),
-               Qt::AlignVCenter, elided);
+    const int icon = qRound(kBadgeIconSize * dpr);
+    // 未置顶：空心图钉 + 灰色；已置顶：实心图钉 + 主题蓝，一眼能分辨
+    m_pinOff = tinted(QPixmap(QStringLiteral(":/assets/pin.png"))
+                          .scaled(icon, icon, Qt::KeepAspectRatio, Qt::SmoothTransformation),
+                      QColor(0x5f, 0x63, 0x68));
+    m_pinOn = tinted(QPixmap(QStringLiteral(":/assets/pin_fill.png"))
+                         .scaled(icon, icon, Qt::KeepAspectRatio, Qt::SmoothTransformation),
+                     QColor(0x2b, 0x6b, 0xf2));
+    m_pinOff.setDevicePixelRatio(dpr);
+    m_pinOn.setDevicePixelRatio(dpr);
+    m_assetsDpr = dpr;
+}
+
+void SoundButtonWidget::drawPin(QPainter &painter) {
+    const QRect r = pinRect();
+    const bool on = m_lib->alwaysOnTop();
+
+    // 半透明白色圆底：不管桌面是什么颜色，图钉都看得清
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(255, 255, 255, on ? 240 : 170));
+    painter.drawEllipse(r);
+    if (m_pinPressed && on) painter.setBrush(QColor(0, 0, 0, 30));
+    if (m_pinPressed && !on) painter.setBrush(QColor(0, 0, 0, 20));
+    if (m_pinPressed) painter.drawEllipse(r);
+    if (on) {   // 置顶时描一圈蓝边，状态更明确
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(0x2b, 0x6b, 0xf2, 110), 1.6));
+        painter.drawEllipse(r.adjusted(1, 1, -1, -1));
+    }
+
+    const int pad = (kBadgeSize - kBadgeIconSize) / 2;
+    painter.drawPixmap(r.adjusted(pad, pad, -pad, -pad), on ? m_pinOn : m_pinOff);
+}
+
+void SoundButtonWidget::paintEvent(QPaintEvent *) {
+    ensureAssets();
+
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+
+    const SoundEntry *en = m_lib->entry(m_lib->currentIndex());
+    const bool ready = en && en->ready;
+    const bool failed = en && en->failed;
+
+    // 状态只用"浓淡"表达：解码中半透明，解码失败更淡 + 右下角红点；窗口里不放文字
+    p.setOpacity(failed ? 0.4 : (ready ? 1.0 : 0.55));
+    const int frame = qBound(0, qRound(m_pressAnim->currentValue().toReal()), kFrameCount - 1);
+    p.drawPixmap(buttonRect(), m_frames.at(frame));
+    p.setOpacity(1.0);
+
+    if (failed) {
+        const QRect dot(buttonRect().right() - 20, buttonRect().bottom() - 20, 18, 18);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(0xd9, 0x30, 0x25));
+        p.drawEllipse(dot);
+        p.setPen(QPen(Qt::white, 2.4, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(dot.center() - QPoint(0, 4), dot.center() + QPoint(0, 1));
+        p.drawPoint(dot.center() + QPoint(0, 5));
+    }
+
+    drawPin(p);
 }
 
 void SoundButtonWidget::mousePressEvent(QMouseEvent *e) {
@@ -119,18 +205,31 @@ void SoundButtonWidget::mousePressEvent(QMouseEvent *e) {
     m_dragging = false;
     m_pressGlobal = e->globalPosition().toPoint();
     m_pressWindowTopLeft = pos();
+
+    // 图钉：只切换置顶，不播音效也不触发按下动画
+    if (pinRect().contains(e->pos())) {
+        m_pinPressed = true;
+        update();
+        return;
+    }
+
+    m_pressUs = sbNowUs();   // 诊断用：记下按下时刻，推流后算端到端耗时
+    animatePress(true);
     playCurrent();   // 按下即播，不等松开
     update();
 }
 
 void SoundButtonWidget::mouseMoveEvent(QMouseEvent *e) {
     if (!m_pressed) return;
+    // 交互契约：位移超过 8px 才当拖动，此时停掉刚触发的误播并放弃按下动画；
+    // 8px 以内仍算点击，声音继续播（手抖不会打断音效）
     if (!m_dragging &&
-        (e->globalPosition().toPoint() - m_pressGlobal).manhattanLength() >
-            kDragThreshold) {
+        (e->globalPosition().toPoint() - m_pressGlobal).manhattanLength() > kDragThreshold) {
         m_dragging = true;
         m_pendingPlay = false;
-        m_audio->stop();   // 确认是拖动而非点击，停掉误播
+        m_pinPressed = false;
+        animatePress(false);
+        m_audio->stop();   // 确认是拖动而非点击，停掉误播（暂停，保住热流）
     }
     if (m_dragging)
         move(m_pressWindowTopLeft + e->globalPosition().toPoint() - m_pressGlobal);
@@ -138,7 +237,16 @@ void SoundButtonWidget::mouseMoveEvent(QMouseEvent *e) {
 
 void SoundButtonWidget::mouseReleaseEvent(QMouseEvent *e) {
     if (e->button() != Qt::LeftButton) return;
+
+    if (m_pinPressed) {   // 松开时还在图钉上才算数（和普通按钮一样可以滑出去取消）
+        m_pinPressed = false;
+        if (pinRect().contains(e->pos())) toggleAlwaysOnTop();
+    } else if (!m_dragging) {
+        animatePress(false);   // 松开回弹（拖动时已经在 mouseMoveEvent 里回弹过）
+    }
+
     if (m_dragging) {
+        // 拖动结束才写配置，避免拖动过程中反复写文件
         m_lib->setWindowPos(pos());
         m_lib->saveConfig();
     }
@@ -150,11 +258,13 @@ void SoundButtonWidget::mouseReleaseEvent(QMouseEvent *e) {
 void SoundButtonWidget::wheelEvent(QWheelEvent *e) {
     const int n = m_lib->count();
     if (n == 0) return;
+    // 只切换不播放：滚轮用来"选"，点击才出声
     const int step = e->angleDelta().y() > 0 ? -1 : 1;
     m_lib->setCurrent((m_lib->currentIndex() + step + n) % n);
 }
 
 void SoundButtonWidget::contextMenuEvent(QContextMenuEvent *e) {
+    // 菜单结构：音效列表（单选）→ 添加/移除 → 音量 → 置顶 → 退出
     QMenu menu(this);
 
     const int n = m_lib->count();
@@ -198,6 +308,7 @@ void SoundButtonWidget::contextMenuEvent(QContextMenuEvent *e) {
     sliderAction->setDefaultWidget(slider);
     volMenu->addAction(sliderAction);
 
+    // 和右上角图钉是同一个开关，两处都能改
     QAction *topAct = menu.addAction(tr("窗口置顶"));
     topAct->setCheckable(true);
     topAct->setChecked(m_lib->alwaysOnTop());
@@ -210,9 +321,12 @@ void SoundButtonWidget::contextMenuEvent(QContextMenuEvent *e) {
 }
 
 void SoundButtonWidget::playCurrent() {
+    const qint64 pressUs = m_pressUs;   // 诊断：从按下到推流的耗时
+    m_pressUs = 0;
     const SoundEntry *en = m_lib->entry(m_lib->currentIndex());
     if (!en) return;
     if (en->failed) {
+        // 解码失败的条目不发声，只在日志里留痕（按钮右下角有红点提示）
         qWarning() << "跳过解码失败的音效:" << en->path;
         return;
     }
@@ -220,10 +334,50 @@ void SoundButtonWidget::playCurrent() {
         m_pendingPlay = true;
         return;
     }
-    m_audio->play(en->pcm, en->format);
+    // 到这里 PCM 已在内存：只剩下"换数据 + 起播"
+    m_audio->play(en->pcm, en->format, pressUs);
+}
+
+// 把所有已解码格式的播放流预热好（首次调用会付设备枚举的固定成本）
+void SoundButtonWidget::prepareFormats() {
+    for (int i = 0; i < m_lib->count(); ++i)
+        if (const SoundEntry *en = m_lib->entry(i); en && en->ready)
+            m_audio->prepare(en->format);
+}
+
+void SoundButtonWidget::animatePress(bool down) {
+    // 从当前帧接着走，连点也不会跳帧
+    const qreal current = m_pressAnim->currentValue().toReal();
+    m_pressAnim->stop();
+    m_pressAnim->setDuration(down ? kPressMs : kReleaseMs);
+    m_pressAnim->setStartValue(current);
+    m_pressAnim->setEndValue(down ? qreal(kFrameCount - 1) : 0.0);
+    m_pressAnim->start();
+}
+
+void SoundButtonWidget::updateToolTip() {
+    const SoundEntry *en = m_lib->entry(m_lib->currentIndex());
+    QString tip;
+    if (!en)             tip = tr("还没有音效，右键添加");
+    else if (en->failed) tip = tr("解码失败：%1").arg(en->name);
+    else if (!en->ready) tip = tr("加载中…");
+    else                 tip = tr("当前音效：%1").arg(en->name);
+    tip += tr("\n点击播放 · 滚轮切换 · 拖动移动 · 图钉置顶 · 右键菜单");
+    setToolTip(tip);
+}
+
+// 窗口里没有任何文字，切歌时用系统提示气泡报一下名字（1.2 秒后自动消失）
+void SoundButtonWidget::flashName() {
+    const SoundEntry *en = m_lib->entry(m_lib->currentIndex());
+    if (!en) return;
+    QString text = en->name;
+    if (en->failed) text = tr("%1（解码失败）").arg(text);
+    else if (!en->ready) text = tr("%1（加载中…）").arg(text);
+    QToolTip::showText(mapToGlobal(QPoint(width() / 2, 0)), text, this, rect(), 1200);
 }
 
 void SoundButtonWidget::addSounds() {
+    // 默认从 exe 旁的 sounds/ 目录开始找，方便用户把音效集中放一起
     const QString appDir = QCoreApplication::applicationDirPath();
     QString start = appDir + QStringLiteral("/sounds");
     if (!QDir(start).exists()) start = appDir;
@@ -249,24 +403,13 @@ void SoundButtonWidget::toggleAlwaysOnTop() {
     setWindowFlag(Qt::WindowStaysOnTopHint, m_lib->alwaysOnTop());
     show();   // 改 flag 会隐藏窗口，需要重新显示
     m_lib->saveConfig();
+    update();
 }
 
 void SoundButtonWidget::makeTrayIcon() {
-    QPixmap pm(32, 32);
-    pm.fill(Qt::transparent);
-    {
-        QPainter p(&pm);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(Qt::NoPen);
-        p.setBrush(QColor(0x2b, 0x6b, 0xf2));
-        p.drawRoundedRect(0, 0, 32, 32, 8, 8);
-        p.setBrush(Qt::white);
-        p.drawPolygon(speakerBody(QRectF(6, 9, 14, 14)));
-        p.setPen(QPen(Qt::white, 1.8, Qt::SolidLine, Qt::RoundCap));
-        p.setBrush(Qt::NoBrush);
-        p.drawArc(QRectF(20, 12, 6, 8), -50 * 16, 100 * 16);
-        p.drawArc(QRectF(20, 9, 11, 14), -50 * 16, 100 * 16);
-    }
+    // 托盘图标直接用按钮素材，和窗口里保持一致
+    QPixmap pm = QPixmap(QStringLiteral(":/assets/button_0.png"))
+                     .scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
     m_tray = new QSystemTrayIcon(this);
     m_tray->setIcon(QIcon(pm));
@@ -276,6 +419,7 @@ void SoundButtonWidget::makeTrayIcon() {
                     [this] { setVisible(!isVisible()); });
     menu->addAction(tr("退出"), qApp, &QCoreApplication::quit);
     m_tray->setContextMenu(menu);
+    // 左键单击托盘 = 显示/隐藏按钮（和菜单里的那一项等价）
     connect(m_tray, &QSystemTrayIcon::activated, this,
             [this](QSystemTrayIcon::ActivationReason reason) {
                 if (reason == QSystemTrayIcon::Trigger)

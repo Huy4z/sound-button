@@ -2,8 +2,9 @@
 build/
 dist/
 
-# ZCode 会话数据
+# 编辑器 / 工具会话数据
 .zcode/
+.vscode/
 
 # 系统文件
 Thumbs.db
