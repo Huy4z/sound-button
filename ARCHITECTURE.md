@@ -16,8 +16,8 @@
    ├─ mousePress 按下即播 · mouseMove 超 8px 判拖动并停声 · contextMenu 菜单
    ├─ QSystemTrayIcon 托盘 · 启动 300ms 后 prepareFormats() 预热
    ├─▶ SoundLibrary —— 数据层
-   │     SoundEntry[]：path / name / format / pcm(shared_ptr) / ready / failed / trimmedLeadMs
-   │     QAudioDecoder 后台整体解码 → trimSilence 裁掉首尾静音
+   │     SoundEntry[]：path / name / format / pcm(shared_ptr) / ready / failed
+   │     QAudioDecoder 后台整体解码 → 内存 PCM（原样保留，不做裁剪/改写）
    │     config.json（QSaveFile 原子写）：列表 / 当前项 / 音量 / 窗口位置 / 置顶
    │            └── entryReady 信号 ──▶ 回到 UI：重绘 + 对新格式顺手预热
    └─▶ AudioEngine —— 播放层
@@ -46,7 +46,7 @@ flowchart TD
     subgraph DATA["SoundLibrary（数据层）"]
         E["SoundEntry 列表<br/>pcm = shared_ptr"]
         D["QAudioDecoder 后台解码"]
-        S["trimSilence 裁首尾静音"]
+        S["音频数据原样保留<br/>（不裁剪 / 不改写）"]
         J["config.json（QSaveFile 原子写）"]
     end
 
@@ -72,7 +72,7 @@ flowchart TD
 | --- | --- | --- | --- |
 | `src/main.cpp` | 入口 | 起 `QApplication`、显示窗口、进事件循环 | 十几行；所有逻辑都在窗口里 |
 | `src/SoundButtonWidget.*` | UI | 无边框置顶小窗、自绘、鼠标/右键、托盘、预热调度 | 只调用数据层与播放层，不碰音频 API |
-| `src/SoundLibrary.*` | 数据 | 音效列表、后台预解码、裁静音、`config.json` 持久化 | `QAudioDecoder` → 内存 PCM（`shared_ptr`） |
+| `src/SoundLibrary.*` | 数据 | 音效列表、后台预解码（原样 PCM）、`config.json` 持久化 | `QAudioDecoder` → 内存 PCM（`shared_ptr`） |
 | `src/AudioEngine.*` | 播放 | 按采样格式维护热流池、推流、停声、音量 | `QAudioSink` + `QBuffer`，零拷贝 |
 | `src/LatencyLog.h` | 诊断 | 「按下 → 推流」耗时打点 | 直接 `fprintf(stderr)`，环境变量开关 |
 | `assets/` | 素材 | 按钮 10 帧动画 + 图钉图标 | 编进 exe（`qt_add_resources`），运行时零外部依赖 |
@@ -133,7 +133,7 @@ sequenceDiagram
 | 进程内第一条鼠标消息的系统投递 | ~10ms | 否，Windows 侧行为 |
 | Qt 事件派发到处理函数 | 0.2~1.4ms | 否 |
 | 按下 → 推流（应用内） | 0.08~0.9ms | 已经是"换数据 + 起播" |
-| 音效文件自带开头静音 | 已裁（原 79~169ms） | 已消除 |
+| 音效文件自带开头静音 | 原样播出（不改动音频数据） | 不消除，属预期行为 |
 | 音频后端 + 设备缓冲 | 十几~上百 ms | 否，蓝牙/HDMI 自身缓冲 |
 
 想复测：`set SOUNDBUTTON_LATENCY_LOG=1 && build\soundbutton.exe 2> lat.log`，每次点击打印一行。
@@ -148,7 +148,7 @@ sequenceDiagram
 - **设备变化**：`QMediaDevices::audioOutputsChanged` → `invalidateSinks()` 丢弃全部热流
   → `prepareFormats()` 在新设备上重建（旧设备上的流已无意义）。
 - **窗口层状态**（音量/位置/置顶/列表/上次播放的音效）统一存在 exe 旁的 `config.json`，由 `SoundLibrary` 读写；
-  启动时按 `lastPlayed`（存路径，列表增删也不会错位）恢复当前音效。
+  启动时按 `lastPlayed`（存路径，列表增删也不会错位）恢复当前音效；空串表示上次选的是菜单顶部的「无」，保持不播放。
 
 ## 六、必须守住的不变量
 

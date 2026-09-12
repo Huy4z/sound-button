@@ -1,3 +1,4 @@
+// UI 层实现：全自绘窗口、鼠标/菜单交互、预热与解码回调的调度。
 #include "SoundButtonWidget.h"
 
 #include "AudioEngine.h"
@@ -91,12 +92,11 @@ SoundButtonWidget::SoundButtonWidget(QWidget *parent) : QWidget(parent) {
         updateToolTip();
         update();
     });
-    // 插拔耳机 / 切换默认输出：热流绑在旧设备上已失效，重建并重新预热
+    // 插拔耳机 / 切换默认输出：引擎自己会监听 audioOutputsChanged 丢弃旧热流
+    // （见 AudioEngine 构造函数），这里只负责在新设备上把各格式重新预热
     auto *devices = new QMediaDevices(this);
-    connect(devices, &QMediaDevices::audioOutputsChanged, this, [this] {
-        m_audio->invalidateSinks();
-        prepareFormats();
-    });
+    connect(devices, &QMediaDevices::audioOutputsChanged, this,
+            [this] { prepareFormats(); });
 
     // 预热：设备枚举 + 建流 + 流初始化在本机合计约 1s（首次点击时付就是干等），
     // 这里推迟一拍执行，先让窗口显示出来
@@ -155,9 +155,10 @@ void SoundButtonWidget::drawPin(QPainter &painter) {
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(255, 255, 255, on ? 240 : 170));
     painter.drawEllipse(r);
-    if (m_pinPressed && on) painter.setBrush(QColor(0, 0, 0, 30));
-    if (m_pinPressed && !on) painter.setBrush(QColor(0, 0, 0, 20));
-    if (m_pinPressed) painter.drawEllipse(r);
+    if (m_pinPressed) {   // 按压反馈：按下时圆底加深一点
+        painter.setBrush(QColor(0, 0, 0, on ? 30 : 20));
+        painter.drawEllipse(r);
+    }
     if (on) {   // 置顶时描一圈蓝边，状态更明确
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(QColor(0x2b, 0x6b, 0xf2, 110), 1.6));
@@ -251,7 +252,6 @@ void SoundButtonWidget::mouseReleaseEvent(QMouseEvent *e) {
     }
     m_pressed = false;
     m_dragging = false;
-    update();
 }
 
 void SoundButtonWidget::contextMenuEvent(QContextMenuEvent *e) {
@@ -262,6 +262,16 @@ void SoundButtonWidget::contextMenuEvent(QContextMenuEvent *e) {
     if (n == 0) {
         menu.addAction(tr("（列表为空，请添加音效）"))->setEnabled(false);
     } else {
+        // 列表顶部固定一个「无」：选中后点击按钮不发声（按下动画照常），
+        // 适合暂时想安静、又不想把音效从列表里删掉的情况
+        QAction *noneAct = menu.addAction(tr("无（不播放音效）"));
+        noneAct->setCheckable(true);
+        noneAct->setChecked(m_lib->currentIndex() < 0);
+        connect(noneAct, &QAction::triggered, this, [this] {
+            m_lib->setCurrent(-1);
+            m_audio->stop();   // 正在响的也立刻停掉：切到「无」就是马上安静
+        });
+
         for (int i = 0; i < n; ++i) {
             const SoundEntry *en = m_lib->entry(i);
             QString label = en->name;
@@ -281,7 +291,7 @@ void SoundButtonWidget::contextMenuEvent(QContextMenuEvent *e) {
     menu.addAction(tr("添加音效…"), this, &SoundButtonWidget::addSounds);
     QAction *removeAct =
         menu.addAction(tr("移除当前音效"), this, &SoundButtonWidget::removeCurrent);
-    removeAct->setEnabled(n > 0);
+    removeAct->setEnabled(m_lib->currentIndex() >= 0);   // 选「无」时没有当前音效可移除
     menu.addSeparator();
 
     QMenu *volMenu = menu.addMenu(tr("音量"));
@@ -315,7 +325,7 @@ void SoundButtonWidget::playCurrent() {
     const qint64 pressUs = m_pressUs;   // 诊断：从按下到推流的耗时
     m_pressUs = 0;
     const SoundEntry *en = m_lib->entry(m_lib->currentIndex());
-    if (!en) return;
+    if (!en) return;   // 列表为空或选的是「无」：按下不发声（按下动画照常播）
     if (en->failed) {
         // 解码失败的条目不发声，只在日志里留痕（按钮右下角有红点提示）
         qWarning() << "跳过解码失败的音效:" << en->path;
@@ -351,13 +361,15 @@ void SoundButtonWidget::resetPress() {
     update();
 }
 
+// 悬停提示：当前状态一句话 + 操作说明（切歌、解码完成、失败都会刷新）
 void SoundButtonWidget::updateToolTip() {
     const SoundEntry *en = m_lib->entry(m_lib->currentIndex());
     QString tip;
-    if (!en)             tip = tr("还没有音效，右键添加");
-    else if (en->failed) tip = tr("解码失败：%1").arg(en->name);
-    else if (!en->ready) tip = tr("加载中…");
-    else                 tip = tr("当前音效：%1").arg(en->name);
+    if (m_lib->isEmpty()) tip = tr("还没有音效，右键添加");
+    else if (!en)         tip = tr("当前未选择音效（点击不播放）");
+    else if (en->failed)  tip = tr("解码失败：%1").arg(en->name);
+    else if (!en->ready)  tip = tr("加载中…");
+    else                  tip = tr("当前音效：%1").arg(en->name);
     tip += tr("\n点击播放 · 拖动移动 · 图钉置顶 · 右键菜单");
     setToolTip(tip);
 }
@@ -365,10 +377,16 @@ void SoundButtonWidget::updateToolTip() {
 // 窗口里没有任何文字，切歌时用系统提示气泡报一下名字（1.2 秒后自动消失）
 void SoundButtonWidget::flashName() {
     const SoundEntry *en = m_lib->entry(m_lib->currentIndex());
-    if (!en) return;
-    QString text = en->name;
-    if (en->failed) text = tr("%1（解码失败）").arg(text);
-    else if (!en->ready) text = tr("%1（加载中…）").arg(text);
+    QString text;
+    if (en) {
+        text = en->name;
+        if (en->failed) text = tr("%1（解码失败）").arg(text);
+        else if (!en->ready) text = tr("%1（加载中…）").arg(text);
+    } else if (!m_lib->isEmpty()) {
+        text = tr("无（不播放音效）");   // 切到「无」也要有反馈，不然像菜单没点上
+    } else {
+        return;
+    }
     QToolTip::showText(mapToGlobal(QPoint(width() / 2, 0)), text, this, rect(), 1200);
 }
 
@@ -407,19 +425,20 @@ void SoundButtonWidget::makeTrayIcon() {
     QPixmap pm = QPixmap(QStringLiteral(":/assets/button_0.png"))
                      .scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
-    m_tray = new QSystemTrayIcon(this);
-    m_tray->setIcon(QIcon(pm));
-    m_tray->setToolTip(tr("音效按钮"));
+    // 以 this 为 parent：不需要成员变量保管，窗口活着托盘就活着
+    auto *tray = new QSystemTrayIcon(this);
+    tray->setIcon(QIcon(pm));
+    tray->setToolTip(tr("音效按钮"));
     auto *menu = new QMenu(this);
     menu->addAction(tr("显示/隐藏按钮"), this,
                     [this] { setVisible(!isVisible()); });
     menu->addAction(tr("退出"), qApp, &QCoreApplication::quit);
-    m_tray->setContextMenu(menu);
+    tray->setContextMenu(menu);
     // 左键单击托盘 = 显示/隐藏按钮（和菜单里的那一项等价）
-    connect(m_tray, &QSystemTrayIcon::activated, this,
+    connect(tray, &QSystemTrayIcon::activated, this,
             [this](QSystemTrayIcon::ActivationReason reason) {
                 if (reason == QSystemTrayIcon::Trigger)
                     setVisible(!isVisible());
             });
-    m_tray->show();
+    tray->show();
 }

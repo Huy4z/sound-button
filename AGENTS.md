@@ -25,7 +25,7 @@ PATH="/d/Library/msys64/ucrt64/bin:$PATH" ./build/soundbutton.exe   # 运行需�
 
 ## 架构不变量（改代码前必读）
 
-- **低延迟是核心需求**：点击路径上只能做"换数据 + 起播"。音效在添加/启动时由 `QAudioDecoder` 后台整体解码成内存 PCM（`SoundEntry::pcm`，`shared_ptr` 与播放端共享，点击路径零拷贝），并裁掉首尾 -80dBFS 以下的数字静音（很多音效文件自带 80~170ms 开头静音，不裁就是白等）。禁止在点击路径上引入解码/媒体管线（如 QMediaPlayer）。播放触发在鼠标**按下**而非松开。
+- **低延迟是核心需求**：点击路径上只能做"换数据 + 起播"。音效在添加/启动时由 `QAudioDecoder` 后台整体解码成内存 PCM（`SoundEntry::pcm`，`shared_ptr` 与播放端共享，点击路径零拷贝）。**不得修改音频数据本身**：解码结果原样保留，不做裁剪/增益/改写，音效自带的首尾静音也照原样播出。禁止在点击路径上引入解码/媒体管线（如 QMediaPlayer）。播放触发在鼠标**按下**而非松开。
 - **播放路径（实测数据支撑，别改回老写法）**：
   - `AudioEngine` 按**采样格式**各保留一条已初始化的"热" QAudioSink（上限 8 条，LRU 淘汰）。`prepare()` 预热：启动后 300ms 由 `SoundButtonWidget` 触发，把设备枚举 + 建流 + 流初始化（本机 1~3s）从点击路径挪到启动阶段。
   - 播放中再次点击：`suspend()`（会丢弃已排队音频）→ 换 PCM → `resume()`，实测 0.6~1.5ms。
@@ -33,10 +33,10 @@ PATH="/d/Library/msys64/ucrt64/bin:$PATH" ./build/soundbutton.exe   # 运行需�
   - 空闲态（播完）再点击走 `start()`，实测 0.1ms —— 所以要让流停留在 Idle，而不是 Stopped。
   - 输出设备变化（`QMediaDevices::audioOutputsChanged`）时 `invalidateSinks()` 丢弃重建。
   - PCM 缓冲区（`QByteArray`）必须与 QBuffer 同生命周期；现由 `Stream::pcm` + 条目共同持有。
-- 配置便携式：`config.json` 写在 `QCoreApplication::applicationDirPath()` 下；首次运行自动导入 exe 旁 `sounds/`。音效列表/当前项（`lastPlayed` 存路径，启动时恢复）/音量/窗口位置/置顶都存这里。
+- 配置便携式：`config.json` 写在 `QCoreApplication::applicationDirPath()` 下；首次运行自动导入 exe 旁 `sounds/`。音效列表/当前项（`lastPlayed` 存路径、空串 = 菜单里的「无」；启动时恢复）/音量/窗口位置/置顶都存这里。
 - **交互契约（`SoundButtonWidget`，改界面时保持）**：
   - 界面只有两样东西：中间的 emoji 按钮 + 右上角的图钉。窗口里不放任何文字——音效名走 tooltip 和切换时的 `flashName()` 气泡，状态用浓淡表达（解码中 55% 透明度，解码失败 40% + 右下角红点）。
-  - 左键**按下**即播，不等松开；移动超过 8px 判定为拖动并停掉误播（见 `SoundButtonWidget::mouseMoveEvent`）。
+  - 左键**按下**即播，不等松开；移动超过 8px 判定为拖动并停掉误播（见 `SoundButtonWidget::mouseMoveEvent`）。菜单列表顶部的「无」= 不发声（`m_current == -1`），按下动画照常。
   - 按下动画只在**按下**时播一次（`animatePress()`）：按住不续播，松开/拖动走 `resetPress()` 瞬时复位，没有回弹动画。
   - 图钉（`pinRect()` 命中区）只切换置顶，不播音效、不触发按下动画；它是置顶的主入口，右键菜单里那项与之共用 `m_lib->alwaysOnTop()`，两边必须同步。
   - 窗口尺寸 = `kButtonSize + 2*kWindowPad`，图钉徽标压在按钮右上角；改大小只需改这两个常量（帧缓存按设备像素比自动重建）。
@@ -52,7 +52,8 @@ PATH="/d/Library/msys64/ucrt64/bin:$PATH" ./build/soundbutton.exe   # 运行需�
 
 ## 文档与注释
 
-- 代码注释一律中文，讲**为什么**（实测数字、踩过的坑、不能改回老写法的原因），不复述代码字面在做什么；改动逻辑时顺手更新同处注释。
+- 头文件是接口文档：类/函数用 `///` 文档注释一句话讲清用途与关键约束（非显然的参数补 `\param`），成员变量用 `///<` 行尾注释；改接口先改注释。
+- 实现注释一律中文，讲**为什么**（实测数字、踩过的坑、不能改回老写法的原因），不复述代码字面在做什么；改动逻辑时顺手更新同处注释。
 - 动到分层、依赖方向或延迟路径时，同步更新 `ARCHITECTURE.md`，并重跑 `pwsh -File tools/gen-architecture-diagram.ps1` 刷新 `docs/architecture.png`。
 - 面向使用者的功能变化写进 `README.md`；本文件只记录"改代码需要知道的事"，不重复 README 的用法说明。
 

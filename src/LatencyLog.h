@@ -11,6 +11,7 @@
 // 只有这样才能稳定地重定向到文件/终端。
 // 用法约定：只允许在"动作做完之后"打点（例如推流结束后），
 // 别把 fprintf 插在鼠标按下与推流之间，否则测到的是日志 I/O 的耗时。
+/// 延迟打点总开关：环境变量 SOUNDBUTTON_LATENCY_LOG 非空即开启；只读一次，点击路径上零开销
 inline bool sbLatencyLog() {
     // 环境变量只读一次：点击路径上不能有反复读环境变量的开销
     static const bool on = !qEnvironmentVariableIsEmpty("SOUNDBUTTON_LATENCY_LOG");
@@ -19,6 +20,7 @@ inline bool sbLatencyLog() {
 
 // 进程内单调时基（微秒，从首次调用起算，不受系统时间调整影响），
 // 用于跨模块打点：鼠标按下记一次、推流结束再记一次，相减就是端到端耗时。
+/// 进程内单调时基（微秒）。跨模块各取一次相减，就是端到端耗时
 inline qint64 sbNowUs() {
     static const QElapsedTimer t = [] { QElapsedTimer x; x.start(); return x; }();
     return t.nsecsElapsed() / 1000;
@@ -26,6 +28,7 @@ inline qint64 sbNowUs() {
 
 // 输出一行带时间戳的日志。必须 fflush：stderr 被重定向到文件时是带缓冲的，
 // 程序若被强杀，没 flush 的日志会整段丢失（调试时会被误导）。
+/// 输出一行带时间戳的延迟日志（关闭时不产生任何格式化与 I/O）；末尾自动 flush
 inline void sbLatLog(const QString &line) {
     if (!sbLatencyLog()) return;
     fprintf(stderr, "[延迟 %8.2fms] %s\n", sbNowUs() / 1000.0,

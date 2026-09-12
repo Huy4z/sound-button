@@ -2,8 +2,8 @@
 
 #include "SoundButtonWidget.h"
 
-// 程序入口。整个应用只有一个悬浮按钮窗口，音效列表、播放、托盘都由它自己持有，
-// 所以 main() 只负责起 Qt、把窗口显示出来、进事件循环。
+// 程序入口：起 QApplication、显示唯一的悬浮按钮窗口、进事件循环。
+// 音效列表、播放、托盘都由 SoundButtonWidget 自己持有，这里保持最小。
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("sound-button"));

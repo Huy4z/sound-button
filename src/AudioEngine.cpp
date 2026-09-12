@@ -1,3 +1,4 @@
+// 播放层实现：热流池的建立与淘汰、预热、推流（播放中重播走 suspend→resume）。
 #include "AudioEngine.h"
 
 #include <QAudio>
@@ -29,8 +30,7 @@ AudioEngine::AudioEngine(QObject *parent) : QObject(parent) {
             &AudioEngine::invalidateSinks);
 }
 
-AudioEngine::Stream *AudioEngine::streamFor(const QAudioFormat &format,
-                                            bool createIfMissing) {
+AudioEngine::Stream *AudioEngine::streamFor(const QAudioFormat &format) {
     // 每次取流都问一次默认设备：用户换输出设备后，旧设备上的热流已经没用了。
     // 这次调用是廉价的（设备列表已缓存），昂贵的首次枚举在 prepare() 阶段就付过了。
     const QAudioDevice device = QMediaDevices::defaultAudioOutput();
@@ -50,7 +50,6 @@ AudioEngine::Stream *AudioEngine::streamFor(const QAudioFormat &format,
             return s.get();
         }
     }
-    if (!createIfMissing) return nullptr;
 
     if (int(m_streams.size()) >= kMaxStreams) {   // 超出上限淘汰最久未用的
         m_streams.erase(std::min_element(
@@ -64,7 +63,7 @@ AudioEngine::Stream *AudioEngine::streamFor(const QAudioFormat &format,
     stream->sink = std::make_unique<QAudioSink>(device, format);
     // isNull()：设备/格式组合无效；error()：驱动拒绝。两者都当建流失败处理
     if (stream->sink->isNull() || stream->sink->error() != QAudio::NoError) {
-        emit errorOccurred(QStringLiteral("无法打开音频输出设备"));
+        sbLatLog(QStringLiteral("建流失败：无法打开音频输出设备"));
         return nullptr;
     }
     // QBuffer 只是把已有 PCM 包成 QIODevice 给 sink 读，不复制数据
@@ -95,7 +94,7 @@ void AudioEngine::warmUp(Stream &stream) {
 
 void AudioEngine::prepare(const QAudioFormat &format) {
     if (!format.isValid()) return;
-    Stream *stream = streamFor(format, true);
+    Stream *stream = streamFor(format);
     // 只预热没跑过的流；已热的不动，避免把正在播放的流打断
     if (stream && !stream->warmed) warmUp(*stream);
 }
@@ -105,7 +104,7 @@ void AudioEngine::play(const std::shared_ptr<QByteArray> &pcm, const QAudioForma
     if (!pcm || pcm->isEmpty() || !format.isValid()) return;
     const qint64 t0 = sbNowUs();
     // 第一步：拿到目标格式的热流（正常情况下就是一次线性查找）
-    Stream *stream = streamFor(format, true);
+    Stream *stream = streamFor(format);
     if (!stream) return;
 
     QAudioSink *sink = stream->sink.get();
@@ -122,16 +121,15 @@ void AudioEngine::play(const std::shared_ptr<QByteArray> &pcm, const QAudioForma
     stream->buffer->open(QIODevice::ReadOnly);
     stream->buffer->seek(0);
 
-    // 第三步：起播。wasRunning 时 suspend 会丢掉还没播完的旧数据，
-    // resume 后后端从新 buffer 的当前位置继续取——所以听到的一定是新音效的开头。
-    // 播放中再点：suspend() 会丢弃已排队的旧音频，恢复后直接从新数据开始
+    // 第三步：起播。suspend() 会丢弃已排队的旧数据，resume 后后端从新 buffer 的
+    // 当前位置继续取——所以听到的一定是新音效的开头，不会带上一段的尾巴
     if (wasRunning) sink->suspend();
     setStreamVolume(*stream);
     if (wasRunning) sink->resume(); else sink->start(stream->buffer.get());
     stream->warmed = true;
 
     if (sink->error() != QAudio::NoError) {
-        emit errorOccurred(QStringLiteral("音频播放启动失败"));
+        sbLatLog(QStringLiteral("播放启动失败：sink 报错"));
         return;
     }
     // 诊断日志放在所有工作完成之后，避免 I/O 混进被测区间
@@ -159,11 +157,8 @@ void AudioEngine::stop() {
             stream->sink->suspend();
 }
 
-void AudioEngine::invalidateSinks() { releaseStreams(); }
-
-void AudioEngine::releaseStreams() {
-    m_streams.clear();   // 析构 QAudioSink 会关闭对应的 WASAPI 流
-}
+// 丢弃全部热流：析构 QAudioSink 即关闭底层 WASAPI 流，下次使用时重建
+void AudioEngine::invalidateSinks() { m_streams.clear(); }
 
 void AudioEngine::setStreamVolume(Stream &stream) {
     if (!stream.sink) return;
@@ -172,14 +167,8 @@ void AudioEngine::setStreamVolume(Stream &stream) {
         stream.sink->setVolume(m_volume);
 }
 
+// 音量立即套到所有热流上；之后新建的流在 warmUp/play 里套用
 void AudioEngine::setVolume(qreal volume) {
     m_volume = qBound<qreal>(0.0, volume, 1.0);
     for (const auto &stream : m_streams) setStreamVolume(*stream);
-}
-
-bool AudioEngine::isPlaying() const {
-    // 任一热流在出声就算"正在播放"（同一时刻通常只有一条流是活的）
-    for (const auto &stream : m_streams)
-        if (stream->sink && stream->sink->state() == QAudio::ActiveState) return true;
-    return false;
 }

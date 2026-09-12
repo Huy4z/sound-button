@@ -79,14 +79,14 @@ $g.DrawString("左键按下（按下即播）· 右键菜单切换音效 · 托�
 Draw-Box 140 244 1240 168 ([System.Drawing.Color]::FromArgb(232, 240, 254)) $cBlue "SoundButtonWidget（UI 层 · 主线程）" @(
     "界面只有一个 QQ emoji 按钮（10 帧按下动画）+ 右上角图钉（切换置顶），其余设置全在右键菜单",
     "mousePress 按下即播 · mouseMove 位移 > 8px 判定拖动并停声 · contextMenu 菜单",
-    "启动 300ms 后 prepareFormats()：把设备枚举与建流成本移出点击路径（entryReady 时对新格式随手预热）"
+    "启动 300ms 后 prepareFormats()：把设备枚举与建流成本移出点击路径；entryReady / 输出设备变化时随手预热"
 )
 
 # ---------- 数据层 / 播放层 ----------
 Draw-Box 140 468 590 250 ([System.Drawing.Color]::FromArgb(230, 244, 234)) $cGreen "SoundLibrary（数据层）" @(
     "SoundEntry[]：path / name / format / pcm / ready",
     "QAudioDecoder 后台整体解码成内存 PCM",
-    "trimSilence 裁掉首尾 -80dBFS 以下静音",
+    "音频数据原样保留（不裁剪 / 不改写）",
     "config.json（QSaveFile 原子写）：列表 / 当前项 /",
     "音量 / 窗口位置 / 置顶"
 )

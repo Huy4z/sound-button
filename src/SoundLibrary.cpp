@@ -1,3 +1,4 @@
+// 数据层实现：列表增删、QAudioDecoder 后台解码到内存 PCM、config.json 原子读写。
 #include "SoundLibrary.h"
 
 #include <QAudioBuffer>
@@ -12,69 +13,8 @@
 #include <QSaveFile>
 #include <QUrl>
 #include <algorithm>
-#include <cmath>
-#include <cstring>
 
 #include "LatencyLog.h"
-
-namespace {
-// 低于 -80dBFS 视为数字静音：只裁真正的"空白"，不碰淡入和编码噪声
-constexpr float kSilencePeak = 1e-4f;
-
-float sampleValue(const char *p, const QAudioFormat &format) {
-    switch (format.sampleFormat()) {
-    case QAudioFormat::Float: {
-        float v;
-        memcpy(&v, p, sizeof v);
-        return v;
-    }
-    case QAudioFormat::Int16: {
-        qint16 v;
-        memcpy(&v, p, sizeof v);
-        return v / 32768.0f;
-    }
-    case QAudioFormat::Int32: {
-        qint32 v;
-        memcpy(&v, p, sizeof v);
-        return v / 2147483648.0f;
-    }
-    case QAudioFormat::UInt8:
-        return (static_cast<quint8>(*p) - 128) / 128.0f;
-    default:
-        return 0.0f;
-    }
-}
-
-// 裁掉首尾的近似静音，返回裁掉的首部时长（毫秒）。
-// 音效文件常自带 80~170ms 开头静音（编码器延迟或人为留白），点击后会先"哑"这么久才出声。
-double trimSilence(QByteArray &pcm, const QAudioFormat &format) {
-    const int frameBytes = format.bytesPerFrame();
-    if (!format.isValid() || frameBytes <= 0) return 0;
-    const qsizetype frames = pcm.size() / frameBytes;
-    if (frames < 2) return 0;
-
-    auto peakAt = [&](qsizetype frame) {
-        const char *p = pcm.constData() + frame * frameBytes;
-        float peak = 0.0f;
-        for (int c = 0; c < format.channelCount(); ++c, p += format.bytesPerSample())
-            peak = qMax(peak, std::fabs(sampleValue(p, format)));
-        return peak;
-    };
-
-    qsizetype first = 0;
-    while (first < frames && peakAt(first) <= kSilencePeak) ++first;
-    if (first == frames) return 0;   // 整段都是静音：保持原样，别把音效裁空
-
-    qsizetype last = frames - 1;
-    while (last > first && peakAt(last) <= kSilencePeak) --last;
-    if (first == 0 && last == frames - 1) return 0;
-
-    const double leadMs = 1000.0 * first / format.sampleRate();
-    pcm.remove(0, first * frameBytes);
-    pcm.truncate((last - first + 1) * frameBytes);
-    return leadMs;
-}
-}  // namespace
 
 const QStringList &SoundLibrary::supportedExtensions() {
     // 静态常量表：文件对话框的过滤器、sounds/ 目录自动导入、添加时的去重都用同一份
@@ -93,6 +33,7 @@ const SoundEntry *SoundLibrary::entry(int index) const {
 }
 
 void SoundLibrary::addFiles(const QStringList &paths) {
+    const bool wasEmpty = m_entries.empty();
     bool added = false;
     for (const QString &p : paths) {
         // 统一成绝对路径再比较，避免同一个文件用不同相对路径写两遍
@@ -111,7 +52,9 @@ void SoundLibrary::addFiles(const QStringList &paths) {
         added = true;
     }
     if (!added) return;
-    if (m_current < 0 && !m_entries.empty()) {
+    // 只有"从空的列表加进第一条"才自动选中；列表里本来就有音效时不抢当前项——
+    // 用户可能显式选了「无」（m_current 同样是 -1），不该被一次添加顺手覆盖
+    if (wasEmpty) {
         m_current = 0;
         emit currentChanged();
     }
@@ -129,12 +72,14 @@ void SoundLibrary::removeCurrent() {
 
 void SoundLibrary::setCurrent(int index) {
     // 立即落盘：切换音效是用户显式意图，程序被强杀也不该丢
-    if (index == m_current || index < 0 || index >= count()) return;
+    // index = -1 合法，表示「无」（点击不发声）；其余越界值直接忽略
+    if (index == m_current || index < -1 || index >= count()) return;
     m_current = index;
     saveConfig();
     emit currentChanged();
 }
 
+// 窗口层状态的读写：只改内存；落盘时机由 UI 决定（拖动结束 / 滑块松开 / 切歌时）
 void SoundLibrary::setVolume(qreal v) { m_volume = qBound<qreal>(0.0, v, 1.0); }
 void SoundLibrary::setWindowPos(const QPoint &p) { m_windowPos = p; }
 void SoundLibrary::setAlwaysOnTop(bool on) { m_alwaysOnTop = on; }
@@ -154,21 +99,19 @@ void SoundLibrary::startDecode(SoundEntry *entry) {
             entry->decoder->deleteLater();
             entry->decoder = nullptr;
         }
-        // 很多音效文件自带 80~170ms 开头静音，裁掉能直接省下这段时间
-        if (ok) entry->trimmedLeadMs = trimSilence(*pcm, entry->format);
+        // 音频数据原样保留：不做任何裁剪/改写，解码结果就是文件本身的内容
         entry->ready = ok && entry->format.isValid() && !pcm->isEmpty();
         if (!entry->ready) pcm->clear();
         entry->pcm = pcm;
         entry->failed = !entry->ready;
         if (entry->ready) {
-            sbLatLog(QStringLiteral("解码完成 %1：%2Hz/%3ch 时长 %4ms（已裁开头静音 %5ms）")
+            sbLatLog(QStringLiteral("解码完成 %1：%2Hz/%3ch 时长 %4ms")
                          .arg(entry->name)
                          .arg(entry->format.sampleRate())
                          .arg(entry->format.channelCount())
                          .arg(1000.0 * entry->pcm->size() /
                                   (entry->format.bytesPerFrame() * entry->format.sampleRate()),
-                              0, 'f', 1)
-                         .arg(entry->trimmedLeadMs, 0, 'f', 1));
+                              0, 'f', 1));
         }
         int idx = -1;
         // 条目可能已被删除，这里重新找一次索引（找不到就是 -1，UI 会忽略）
@@ -178,7 +121,7 @@ void SoundLibrary::startDecode(SoundEntry *entry) {
     };
 
     // bufferReady：解码器有数据可读，全部读空。格式以第一块为准，后续块应当是同一格式
-    connect(dec, &QAudioDecoder::bufferReady, entry, [this, entry, dec, pcm] {
+    connect(dec, &QAudioDecoder::bufferReady, entry, [entry, dec, pcm] {
         if (!entry->decoder) return;
         while (dec->bufferAvailable()) {
             const QAudioBuffer buf = dec->read();
@@ -192,7 +135,7 @@ void SoundLibrary::startDecode(SoundEntry *entry) {
     connect(dec,
             static_cast<void (QAudioDecoder::*)(QAudioDecoder::Error)>(
                 &QAudioDecoder::error),
-            entry, [this, entry, dec, pcm, finish](QAudioDecoder::Error) {
+            entry, [entry, dec, pcm, finish](QAudioDecoder::Error) {
                 if (!entry->decoder) return;
                 if (!pcm->isEmpty()) {   // 已解出可用数据，末尾的小错误忽略
                     finish(true);
@@ -231,25 +174,33 @@ void SoundLibrary::loadConfig() {
         }
         addFiles(paths);
 
-        // 恢复"上次播放"的音效：优先按路径找——列表增删、文件缺失都会让存下来的
-        // 下标错位，路径不会；只有老配置里没写 lastPlayed 时才退回用下标
+        // 恢复上次的选择：
+        //  - lastPlayed 是路径：按路径找——列表增删、文件缺失都会让存下来的下标错位，路径不会
+        //  - lastPlayed 是空串：上次选的是「无」，保持点击不发声
+        //  - 没有 lastPlayed 键：老配置，退回按 current 下标
         int restore = -1;
-        const QString lastPath = o.value(QStringLiteral("lastPlayed")).toString();
-        if (!lastPath.isEmpty()) {
-            // 先归一成绝对路径再比：配置里可能是反斜杠等别的写法，条目路径是 absoluteFilePath 形式
-            const QString want = QFileInfo(lastPath).absoluteFilePath();
-            for (int i = 0; i < count(); ++i) {
-                if (m_entries[i]->path == want) {
-                    restore = i;
-                    break;
+        bool savedNone = false;
+        if (o.contains(QStringLiteral("lastPlayed"))) {
+            const QString lastPath = o.value(QStringLiteral("lastPlayed")).toString();
+            if (lastPath.isEmpty()) {
+                savedNone = true;
+            } else {
+                // 先归一成绝对路径再比：配置里可能是反斜杠等别的写法，条目路径是 absoluteFilePath 形式
+                const QString want = QFileInfo(lastPath).absoluteFilePath();
+                for (int i = 0; i < count(); ++i) {
+                    if (m_entries[i]->path == want) {
+                        restore = i;
+                        break;
+                    }
                 }
             }
         }
-        if (restore < 0) {
+        if (!savedNone && restore < 0) {
             const int saved = o.value(QStringLiteral("current")).toInt(-1);
             if (saved >= 0 && saved < count()) restore = saved;
         }
-        if (restore >= 0) m_current = restore;
+        if (savedNone) m_current = -1;
+        else if (restore >= 0) m_current = restore;
         if (m_current >= count()) m_current = count() - 1;
         return;
     }
@@ -277,9 +228,12 @@ void SoundLibrary::saveConfig() {
     QJsonObject o;
     o[QStringLiteral("sounds")] = sounds;
     o[QStringLiteral("current")] = m_current;
-    // "上次播放"：存路径而不是下标（列表增删后下标会错位），启动时按它恢复当前音效
+    // "上次播放"：存路径而不是下标（列表增删后下标会错位），启动时按它恢复当前音效；
+    // 选的是「无」时写空串——这个键必须留着，启动时才能区分"上次选了无"和"老配置没这一项"
     if (const SoundEntry *cur = entry(m_current))
         o[QStringLiteral("lastPlayed")] = cur->path;
+    else
+        o[QStringLiteral("lastPlayed")] = QString();
     o[QStringLiteral("volume")] = m_volume;
     o[QStringLiteral("pos")] = QJsonArray{m_windowPos.x(), m_windowPos.y()};
     o[QStringLiteral("alwaysOnTop")] = m_alwaysOnTop;
