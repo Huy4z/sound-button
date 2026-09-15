@@ -14,16 +14,32 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v7
 
-      - name: 安装 MSYS2 UCRT64 工具链与 Qt 6
+      - name: 准备 MSYS2（UCRT64）
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          update: true
-          install: >-
+
+      # MSYS2 镜像偶发抽风（"Operation too slow" 会整单失败）会误报成构建失败，
+      # 所以关掉低速超时并重试三次
+      - name: 安装 UCRT64 工具链与 Qt 6
+        shell: msys2 {0}
+        run: |
+          grep -q '^DisableDownloadTimeout' /etc/pacman.conf || echo 'DisableDownloadTimeout' >> /etc/pacman.conf
+          packages=(
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-qt6-multimedia
+          )
+          for attempt in 1 2 3; do
+            if pacman -Syu --noconfirm --needed "${packages[@]}"; then
+              exit 0
+            fi
+            echo "安装失败（第 $attempt 次），10 秒后重试…" >&2
+            sleep 10
+          done
+          echo "三次安装均失败" >&2
+          exit 1
 
       - name: 构建
         shell: msys2 {0}
